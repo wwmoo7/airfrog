@@ -273,6 +273,13 @@ impl<'a> SwdInterface<'a> {
         Ok(mcu)
     }
 
+    pub async fn refresh_mcu(&mut self) -> Result<Option<Mcu>, SwdError> {
+        let idcode = self.idcode.ok_or(SwdError::NotReady)?;
+        let mcu = self.enable_target(idcode).await?;
+        self.mcu = mcu;
+        Ok(self.mcu)
+    }
+
     /// Resets and connects to the target's SWD interface.
     ///
     /// This performs the standard SWD reset sequence, for either V1 or V2
@@ -1939,7 +1946,9 @@ impl<'a> SwdInterface<'a> {
                 let flash_size_addr = StmFlashSize::addr_from_family(device_id.family());
                 let flash_size = if let Some(flash_size_addr) = flash_size_addr {
                     let flash_size_raw = self.read_mem(flash_size_addr).await?;
-                    let flash_size_raw = (flash_size_raw >> 16) as u16;
+                    let upper = (flash_size_raw >> 16) as u16;
+                    let lower = (flash_size_raw & 0xFFFF) as u16;
+                    let flash_size_raw = if upper != 0 && upper != 0xFFFF { upper } else { lower };
                     Some(StmFlashSize::new(flash_size_raw))
                 } else {
                     None
@@ -1951,7 +1960,41 @@ impl<'a> SwdInterface<'a> {
 
                 Ok(mcu)
             }
-            Cortex::IDCODE_M0 => {
+            Cortex::IDCODE_M0 | Cortex::IDCODE_M0_PLUS => {
+                const STM32G0_DBGMCU_IDCODE_ADDR: u32 = 0x4001_5800;
+
+                if let Ok(data) = self.read_mem(STM32G0_DBGMCU_IDCODE_ADDR).await {
+                    let device_id = StmDeviceId::new(data);
+
+                    if device_id.family().known() {
+                        let uid_addr = StmUniqueId::addr_from_family(device_id.family());
+                        let unique_id = if let Some(uid_addr) = uid_addr {
+                            let mut uid = [0; 3];
+                            for (ii, uid) in uid.iter_mut().enumerate() {
+                                *uid = self.read_mem(uid_addr + (ii as u32 * 4)).await?;
+                            }
+                            Some(StmUniqueId::new(uid))
+                        } else {
+                            None
+                        };
+
+                        let flash_size_addr = StmFlashSize::addr_from_family(device_id.family());
+                        let flash_size = if let Some(flash_size_addr) = flash_size_addr {
+                            let flash_size_raw = self.read_mem(flash_size_addr).await?;
+                            let upper = (flash_size_raw >> 16) as u16;
+                            let lower = (flash_size_raw & 0xFFFF) as u16;
+                            let flash_size_raw =
+                                if upper != 0 && upper != 0xFFFF { upper } else { lower };
+                            Some(StmFlashSize::new(flash_size_raw))
+                        } else {
+                            None
+                        };
+
+                        let stm = StmDetails::new(device_id, idcode, unique_id, flash_size);
+                        return Ok(Mcu::Stm32(stm));
+                    }
+                }
+
                 let chip_id = self.read_mem(rp::RP2040_CHIP_ID_ADDR).await?;
                 let cpu_id = self.read_mem(rp::RP2040_CPU_ID_ADDR).await?;
                 if chip_id == rp::RP2040_CHIP_ID && cpu_id == rp::RP2040_CPU_ID {
@@ -1965,6 +2008,40 @@ impl<'a> SwdInterface<'a> {
                 Ok(Mcu::Unknown(idcode))
             }
             _ => {
+                const STM32G0_DBGMCU_IDCODE_ADDR: u32 = 0x4001_5800;
+
+                if let Ok(data) = self.read_mem(STM32G0_DBGMCU_IDCODE_ADDR).await {
+                    let device_id = StmDeviceId::new(data);
+
+                    if device_id.family().known() {
+                        let uid_addr = StmUniqueId::addr_from_family(device_id.family());
+                        let unique_id = if let Some(uid_addr) = uid_addr {
+                            let mut uid = [0; 3];
+                            for (ii, uid) in uid.iter_mut().enumerate() {
+                                *uid = self.read_mem(uid_addr + (ii as u32 * 4)).await?;
+                            }
+                            Some(StmUniqueId::new(uid))
+                        } else {
+                            None
+                        };
+
+                        let flash_size_addr = StmFlashSize::addr_from_family(device_id.family());
+                        let flash_size = if let Some(flash_size_addr) = flash_size_addr {
+                            let flash_size_raw = self.read_mem(flash_size_addr).await?;
+                            let upper = (flash_size_raw >> 16) as u16;
+                            let lower = (flash_size_raw & 0xFFFF) as u16;
+                            let flash_size_raw =
+                                if upper != 0 && upper != 0xFFFF { upper } else { lower };
+                            Some(StmFlashSize::new(flash_size_raw))
+                        } else {
+                            None
+                        };
+
+                        let stm = StmDetails::new(device_id, idcode, unique_id, flash_size);
+                        return Ok(Mcu::Stm32(stm));
+                    }
+                }
+
                 info!("Info:  Unknown MCU family: {idcode}");
                 Ok(Mcu::Unknown(idcode))
             }

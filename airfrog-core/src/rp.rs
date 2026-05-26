@@ -97,7 +97,7 @@ impl RpDetails {
     /// Create a new `RpDetails` instance from IdCode
     pub fn from_idcode(idcode: IdCode) -> Option<Self> {
         match idcode {
-            Cortex::IDCODE_M0 => Some(RpDetails {
+            Cortex::IDCODE_M0 | Cortex::IDCODE_M0_PLUS => Some(RpDetails {
                 line: RpLine::Rp2040,
             }),
             Cortex::IDCODE_M33 => Some(RpDetails {

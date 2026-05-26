@@ -10,7 +10,7 @@ use core::ops::RangeInclusive;
 
 use crate::arm::Cortex;
 use crate::arm::ap::Idr;
-use crate::arm::ap::{IDR_AHB_AP_CORTEX_M3, IDR_AHB_AP_CORTEX_M4};
+use crate::arm::ap::{IDR_AHB_AP_CORTEX_M0, IDR_AHB_AP_CORTEX_M3, IDR_AHB_AP_CORTEX_M4};
 use crate::arm::dp::IdCode;
 
 // STM32F4 Flash memory base address
@@ -217,6 +217,84 @@ impl Stm32F4FlashKeyr {
     pub const KEY2: u32 = 0xCDEF89AB;
 }
 
+const STM32G0_FLASH_REG_BASE: u32 = 0x4002_2000;
+
+pub struct Stm32G0FlashCr;
+
+impl Stm32G0FlashCr {
+    pub const ADDRESS: u32 = STM32G0_FLASH_REG_BASE + 0x14;
+
+    pub const LOCK_BIT: u32 = 31;
+    pub const STRT_BIT: u32 = 16;
+    pub const BKER_BIT: u32 = 13;
+    pub const PER_BIT: u32 = 1;
+    pub const PG_BIT: u32 = 0;
+
+    pub const PNB_SHIFT: u32 = 3;
+    pub const PNB_MASK: u32 = 0x7F;
+}
+
+pub struct Stm32G0FlashSr(u32);
+
+impl Stm32G0FlashSr {
+    pub const ADDRESS: u32 = STM32G0_FLASH_REG_BASE + 0x10;
+
+    pub const EOP_BIT: u32 = 0;
+    pub const PROGERR_BIT: u32 = 3;
+    pub const WRPERR_BIT: u32 = 4;
+    pub const PGAERR_BIT: u32 = 5;
+    pub const SIZERR_BIT: u32 = 6;
+    pub const BSY1_BIT: u32 = 16;
+    pub const BSY2_BIT: u32 = 17;
+    pub const CFGBSY_BIT: u32 = 18;
+
+    pub fn busy(&self) -> bool {
+        let busy_mask =
+            (1 << Self::BSY1_BIT) | (1 << Self::BSY2_BIT) | (1 << Self::CFGBSY_BIT);
+        self.0 & busy_mask != 0
+    }
+
+    pub fn errors(&self) -> bool {
+        let error_mask = (1 << Self::SIZERR_BIT)
+            | (1 << Self::PGAERR_BIT)
+            | (1 << Self::WRPERR_BIT)
+            | (1 << Self::PROGERR_BIT);
+        self.0 & error_mask != 0
+    }
+
+    pub fn error_clear_mask() -> u32 {
+        (1 << Self::SIZERR_BIT)
+            | (1 << Self::PGAERR_BIT)
+            | (1 << Self::WRPERR_BIT)
+            | (1 << Self::PROGERR_BIT)
+    }
+
+    pub fn eop_set(&self) -> bool {
+        (self.0 >> Self::EOP_BIT) & 1 != 0
+    }
+}
+
+impl From<u32> for Stm32G0FlashSr {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Display for Stm32G0FlashSr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:08X}", self.0)
+    }
+}
+
+pub struct Stm32G0FlashKeyr;
+
+impl Stm32G0FlashKeyr {
+    pub const ADDRESS: u32 = STM32G0_FLASH_REG_BASE + 0x08;
+
+    pub const KEY1: u32 = 0x45670123;
+    pub const KEY2: u32 = 0xCDEF89AB;
+}
+
 /// STM32 product family
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StmFamily {
@@ -225,6 +303,9 @@ pub enum StmFamily {
 
     /// STM32F1 family
     F1,
+
+    /// STM32G0 family
+    G0,
 
     /// Unknown STM32 family
     Unknown,
@@ -242,6 +323,7 @@ impl fmt::Display for StmFamily {
         match self {
             StmFamily::F4 => write!(f, "STM32F4"),
             StmFamily::F1 => write!(f, "STM32F1"),
+            StmFamily::G0 => write!(f, "STM32G0"),
             StmFamily::Unknown => write!(f, "Unknown"),
         }
     }
@@ -275,6 +357,9 @@ pub enum StmLine {
     /// STM32F103
     F103,
 
+    /// STM32G070/071 (STM32G07x family)
+    G070_G071,
+
     /// Unknown STM32 line
     Unknown,
 }
@@ -302,6 +387,7 @@ impl StmLine {
             StmLine::F4x5 => Some(128),
             StmLine::F446 => Some(128),
             StmLine::F103 => Some(20),
+            StmLine::G070_G071 => None,
             StmLine::Unknown => None,
         }
     }
@@ -322,6 +408,7 @@ impl StmLine {
             StmLine::F4x5 => Some(64),
             StmLine::F446 => None,
             StmLine::F103 => None,
+            StmLine::G070_G071 => None,
             StmLine::Unknown => None,
         }
     }
@@ -338,6 +425,7 @@ impl fmt::Display for StmLine {
             StmLine::F427_F437 => write!(f, "STM32F427/437"),
             StmLine::F446 => write!(f, "STM32F446"),
             StmLine::F103 => write!(f, "STM32F103"),
+            StmLine::G070_G071 => write!(f, "STM32G070/071"),
             StmLine::Unknown => write!(f, "Unknown STM32"),
         }
     }
@@ -392,6 +480,7 @@ impl StmDeviceId {
         match self.device_id() {
             0x423 | 0x433 | 0x431 | 0x413 | 0x419 | 0x463 | 0x421 => StmFamily::F4,
             0x412 | 0x410 | 0x414 | 0x430 | 0x418 => StmFamily::F1,
+            0x460 => StmFamily::G0,
             _ => StmFamily::Unknown,
         }
     }
@@ -407,6 +496,7 @@ impl StmDeviceId {
             0x463 => StmLine::F413_F423,
             0x421 => StmLine::F446,
             0x410 => StmLine::F103,
+            0x460 => StmLine::G070_G071,
             _ => StmLine::Unknown,
         }
     }
@@ -456,6 +546,7 @@ impl StmDeviceId {
                 0x2003 => "1/2/3/X/Y",
                 _ => "unknown",
             },
+            StmLine::G070_G071 => "unknown",
             StmLine::Unknown => "unknown",
         }
     }
@@ -512,6 +603,7 @@ pub struct StmUniqueId {
 impl StmUniqueId {
     pub const STM32F4_INITIAL_ADDRESS: u32 = 0x1FFF_7A10;
     pub const STM32F1_INITIAL_ADDRESS: u32 = 0x1FFF_F7E8;
+    pub const STM32G0_INITIAL_ADDRESS: u32 = 0x1FFF_7590;
 
     /// Get the initial address for reading the Unique ID based on the STM32#
     /// family.
@@ -519,6 +611,7 @@ impl StmUniqueId {
         match family {
             StmFamily::F4 => Some(Self::STM32F4_INITIAL_ADDRESS),
             StmFamily::F1 => Some(Self::STM32F1_INITIAL_ADDRESS),
+            StmFamily::G0 => Some(Self::STM32G0_INITIAL_ADDRESS),
             StmFamily::Unknown => None,
         }
     }
@@ -626,6 +719,7 @@ impl StmFlashSize {
     /// a 4-bit aligned address.
     pub const STM32F4_ADDRESS_OF_U16: u32 = 0x1FFF_7A20;
     pub const STM32F1_ADDRESS_OF_U16: u32 = 0x1FFF_F7E0;
+    pub const STM32G0_ADDRESS_OF_U16: u32 = 0x1FFF_75E0;
 
     /// Get the initial address for reading the Flash Size based on the STM32
     /// family.
@@ -633,6 +727,7 @@ impl StmFlashSize {
         match family {
             StmFamily::F4 => Some(Self::STM32F4_ADDRESS_OF_U16),
             StmFamily::F1 => Some(Self::STM32F1_ADDRESS_OF_U16),
+            StmFamily::G0 => Some(Self::STM32G0_ADDRESS_OF_U16),
             StmFamily::Unknown => None,
         }
     }
@@ -729,6 +824,7 @@ impl StmDetails {
         match self.mcu.family() {
             StmFamily::F4 => Some(STM32F4_FLASH_BASE),
             StmFamily::F1 => Some(STM32F1_FLASH_BASE),
+            StmFamily::G0 => Some(STM32F4_FLASH_BASE),
             StmFamily::Unknown => None,
         }
     }
@@ -738,6 +834,7 @@ impl StmDetails {
         match self.mcu.family() {
             StmFamily::F4 => Some(STM32F4_RAM_BASE),
             StmFamily::F1 => Some(STM32F1_RAM_BASE),
+            StmFamily::G0 => Some(STM32F4_RAM_BASE),
             StmFamily::Unknown => None,
         }
     }
@@ -909,6 +1006,8 @@ impl StmDetails {
             Some(IDR_AHB_AP_CORTEX_M4)
         } else if self.is_stm32f1() {
             Some(IDR_AHB_AP_CORTEX_M3)
+        } else if matches!(self.mcu.family(), StmFamily::G0) {
+            Some(IDR_AHB_AP_CORTEX_M0)
         } else {
             None
         }

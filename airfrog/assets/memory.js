@@ -217,13 +217,14 @@ async function updateFirmware(file) {
 
         // Reset after flashing if requested
         const resetAfter = document.getElementById('resetAfter');
-        if (resetAfter && resetAfter.checked) {
+        const didHalt = resetBefore && resetBefore.checked;
+        const doReset = (resetAfter && resetAfter.checked) || didHalt;
+        if (doReset) {
             await resetProcessor();
-            
-            // Re-enable keepalive only if resetting
-            response = await fetch(`${API_BASE}/target/reset`, { method: 'POST' });
-            if (!response.ok) throw new Error(`Failed to re-enable keepalive: ${response.status}`);
         }
+
+        response = await fetch(`${API_BASE}/target/reset`, { method: 'POST' });
+        if (!response.ok) throw new Error(`Failed to re-enable keepalive: ${response.status}`);
         
         // Check final processor state
         const processorState = await checkProcessorState();
@@ -399,11 +400,10 @@ async function eraseFlash() {
         const resetAfter = document.getElementById('resetAfter');
         if (resetAfter && resetAfter.checked) {
             await resetProcessor();
-            
-            // Re-enable keepalive only if resetting
-            response = await fetch(`${API_BASE}/target/reset`, { method: 'POST' });
-            if (!response.ok) throw new Error(`Failed to re-enable keepalive: ${response.status}`);
         }
+
+        response = await fetch(`${API_BASE}/target/reset`, { method: 'POST' });
+        if (!response.ok) throw new Error(`Failed to re-enable keepalive: ${response.status}`);
         
         updateProgress(100);
         

@@ -28,6 +28,7 @@ pub enum Cortex {
 
 impl Cortex {
     pub const IDCODE_M0: IdCode = IdCode::from_u32(0x0BC12477);
+    pub const IDCODE_M0_PLUS: IdCode = IdCode::from_u32(0x0BC11477);
     pub const IDCODE_M3: IdCode = IdCode::from_u32(0x1BA01477);
     pub const IDCODE_M4: IdCode = IdCode::from_u32(0x2BA01477);
     pub const IDCODE_M33: IdCode = IdCode::from_u32(0x4C013477);
@@ -54,7 +55,7 @@ impl Cortex {
 
     pub fn from_idcode(idcode: IdCode) -> Option<Cortex> {
         match idcode {
-            Self::IDCODE_M0 => Some(Cortex::M0),
+            Self::IDCODE_M0 | Self::IDCODE_M0_PLUS => Some(Cortex::M0),
             Self::IDCODE_M3 => Some(Cortex::M3),
             Self::IDCODE_M4 => Some(Cortex::M4),
             Self::IDCODE_M33 => Some(Cortex::M33),

@@ -27,7 +27,14 @@ use airfrog_core::Mcu;
 use airfrog_core::arm::ap::{Idr, IdrRegister};
 use airfrog_core::arm::dp::{IdCode, TARGET_SEL_RP2040_ALL};
 use airfrog_core::stm::StmFamily;
-use airfrog_core::stm::{Stm32F4FlashCr, Stm32F4FlashKeyr, Stm32F4FlashSr};
+use airfrog_core::stm::{
+    Stm32F4FlashCr,
+    Stm32F4FlashKeyr,
+    Stm32F4FlashSr,
+    Stm32G0FlashCr,
+    Stm32G0FlashKeyr,
+    Stm32G0FlashSr,
+};
 
 use crate::SwdError;
 use crate::interface::SwdInterface;
@@ -384,6 +391,17 @@ impl<'a> DebugInterface<'a> {
                     self.write_mem(Stm32F4FlashKeyr::ADDRESS, Stm32F4FlashKeyr::KEY2)
                         .await
                 }
+                StmFamily::G0 => {
+                    debug!("Unlocking STM32G0 flash");
+                    let cr = self.read_mem(Stm32G0FlashCr::ADDRESS).await?;
+                    if (cr >> Stm32G0FlashCr::LOCK_BIT) & 1 != 0 {
+                        self.write_mem(Stm32G0FlashKeyr::ADDRESS, Stm32G0FlashKeyr::KEY1)
+                            .await?;
+                        self.write_mem(Stm32G0FlashKeyr::ADDRESS, Stm32G0FlashKeyr::KEY2)
+                            .await?;
+                    }
+                    Ok(())
+                }
                 _ => {
                     warn!("Unlocking flash for non-F4 STM32 is not supported");
                     Err(SwdError::Unsupported)
@@ -417,6 +435,13 @@ impl<'a> DebugInterface<'a> {
                     let addr = Stm32F4FlashCr::ADDRESS;
                     let mut flash_cr = self.read_mem(addr).await?;
                     flash_cr |= 1 << Stm32F4FlashCr::LOCK_BIT;
+                    self.write_mem(addr, flash_cr).await
+                }
+                StmFamily::G0 => {
+                    debug!("Locking STM32G0 flash");
+                    let addr = Stm32G0FlashCr::ADDRESS;
+                    let mut flash_cr = self.read_mem(addr).await?;
+                    flash_cr |= 1 << Stm32G0FlashCr::LOCK_BIT;
                     self.write_mem(addr, flash_cr).await
                 }
                 _ => {
@@ -464,6 +489,134 @@ impl<'a> DebugInterface<'a> {
         Ok(())
     }
 
+    async fn stm32g0_wait_not_busy(&mut self) -> Result<(), SwdError> {
+        loop {
+            let sr: Stm32G0FlashSr = self.read_mem(Stm32G0FlashSr::ADDRESS).await?.into();
+            if !sr.busy() {
+                return Ok(());
+            }
+            Timer::after(Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn stm32g0_clear_status(&mut self) -> Result<(), SwdError> {
+        let sr: Stm32G0FlashSr = self.read_mem(Stm32G0FlashSr::ADDRESS).await?.into();
+        let mut clear = Stm32G0FlashSr::error_clear_mask();
+        if sr.eop_set() {
+            clear |= 1 << Stm32G0FlashSr::EOP_BIT;
+        }
+        if clear != 0 {
+            self.write_mem(Stm32G0FlashSr::ADDRESS, clear).await?;
+        }
+        Ok(())
+    }
+
+    async fn execute_stm32g0_erase_page(&mut self, flash_cr: u32) -> Result<(), SwdError> {
+        self.stm32g0_wait_not_busy().await?;
+        self.stm32g0_clear_status().await?;
+
+        let cr_addr = Stm32G0FlashCr::ADDRESS;
+        let flash_cr = flash_cr | (1 << Stm32G0FlashCr::STRT_BIT);
+        self.write_mem(cr_addr, flash_cr).await?;
+
+        loop {
+            let sr: Stm32G0FlashSr = self.read_mem(Stm32G0FlashSr::ADDRESS).await?.into();
+            if sr.errors() {
+                return Err(SwdError::OperationFailed(format!("flash erase failure {sr}")));
+            }
+            if !sr.busy() {
+                break;
+            }
+            Timer::after(Duration::from_millis(1)).await;
+        }
+
+        Ok(())
+    }
+
+    async fn execute_stm32g0_program_doubleword(
+        &mut self,
+        addr: u32,
+        lo: u32,
+        hi: u32,
+    ) -> Result<(), SwdError> {
+        if addr & 0x7 != 0 {
+            return Err(SwdError::Api);
+        }
+
+        self.stm32g0_wait_not_busy().await?;
+        self.stm32g0_clear_status().await?;
+
+        let cr_addr = Stm32G0FlashCr::ADDRESS;
+        let mut cr = self.read_mem(cr_addr).await?;
+        cr |= 1 << Stm32G0FlashCr::PG_BIT;
+        self.write_mem(cr_addr, cr).await?;
+
+        self.write_mem(addr, lo).await?;
+        self.write_mem(addr + 4, hi).await?;
+
+        loop {
+            let sr: Stm32G0FlashSr = self.read_mem(Stm32G0FlashSr::ADDRESS).await?.into();
+            if sr.errors() {
+                let mut cr = self.read_mem(cr_addr).await?;
+                cr &= !(1 << Stm32G0FlashCr::PG_BIT);
+                self.write_mem(cr_addr, cr).await.ok();
+                return Err(SwdError::OperationFailed(format!(
+                    "flash program failure {sr}"
+                )));
+            }
+            if !sr.busy() {
+                break;
+            }
+            Timer::after(Duration::from_millis(1)).await;
+        }
+
+        let mut cr = self.read_mem(cr_addr).await?;
+        cr &= !(1 << Stm32G0FlashCr::PG_BIT);
+        self.write_mem(cr_addr, cr).await?;
+
+        Ok(())
+    }
+
+    async fn stm32g0_write_rmw(&mut self, addr: u32, data: u32, bytes: OperationBytes) -> Result<(), SwdError> {
+        let base = addr & !0x7;
+        let offset = (addr - base) as usize;
+
+        let mut lo = self.read_mem(base).await?;
+        let mut hi = self.read_mem(base + 4).await?;
+
+        let mut buf = [0u8; 8];
+        buf[0..4].copy_from_slice(&lo.to_le_bytes());
+        buf[4..8].copy_from_slice(&hi.to_le_bytes());
+
+        match bytes {
+            OperationBytes::BYTE1 => {
+                buf[offset] = data as u8;
+            }
+            OperationBytes::BYTE2 => {
+                if addr & 1 != 0 {
+                    return Err(SwdError::Api);
+                }
+                let b = (data as u16).to_le_bytes();
+                buf[offset] = b[0];
+                buf[offset + 1] = b[1];
+            }
+            OperationBytes::BYTE4 => {
+                if addr & 3 != 0 {
+                    return Err(SwdError::Api);
+                }
+                let b = data.to_le_bytes();
+                buf[offset] = b[0];
+                buf[offset + 1] = b[1];
+                buf[offset + 2] = b[2];
+                buf[offset + 3] = b[3];
+            }
+        }
+
+        lo = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        hi = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        self.execute_stm32g0_program_doubleword(base, lo, hi).await
+    }
+
     /// Erase a flash memory sector
     ///
     /// This function erases a flash memory sector on the target device.
@@ -499,6 +652,38 @@ impl<'a> DebugInterface<'a> {
                     // Perform the erase and wait for completion
                     self.execute_stm32f4_erase(flash_cr).await
                 }
+                StmFamily::G0 => {
+                    const PAGE_SIZE: u32 = 0x800;
+                    const BANK_SIZE: u32 = 0x40000;
+
+                    let flash_size_bytes = stm.flash_size_bytes().ok_or(SwdError::Unsupported)?;
+                    let max_pages = flash_size_bytes / PAGE_SIZE;
+                    if sector >= max_pages {
+                        return Err(SwdError::Api);
+                    }
+
+                    let flash_offset = sector * PAGE_SIZE;
+                    let page_in_bank = (flash_offset >> 11) & Stm32G0FlashCr::PNB_MASK;
+                    let bker = flash_offset >= BANK_SIZE;
+
+                    let cr_addr = Stm32G0FlashCr::ADDRESS;
+                    let mut cr = self.read_mem(cr_addr).await?;
+                    cr &= !(Stm32G0FlashCr::PNB_MASK << Stm32G0FlashCr::PNB_SHIFT);
+                    cr &= !(1 << Stm32G0FlashCr::BKER_BIT);
+                    cr |= 1 << Stm32G0FlashCr::PER_BIT;
+                    if bker {
+                        cr |= 1 << Stm32G0FlashCr::BKER_BIT;
+                    }
+                    cr |= page_in_bank << Stm32G0FlashCr::PNB_SHIFT;
+                    self.write_mem(cr_addr, cr).await?;
+
+                    self.execute_stm32g0_erase_page(cr).await?;
+
+                    let mut cr = self.read_mem(cr_addr).await?;
+                    cr &= !(1 << Stm32G0FlashCr::PER_BIT);
+                    self.write_mem(cr_addr, cr).await?;
+                    Ok(())
+                }
                 _ => {
                     warn!("Erasing flash for non-F4 STM32 is not supported");
                     Err(SwdError::Unsupported)
@@ -533,6 +718,15 @@ impl<'a> DebugInterface<'a> {
 
                     // Perform the erase and wait for completion
                     self.execute_stm32f4_erase(flash_cr).await
+                }
+                StmFamily::G0 => {
+                    const PAGE_SIZE: u32 = 0x800;
+                    let flash_size_bytes = stm.flash_size_bytes().ok_or(SwdError::Unsupported)?;
+                    let page_count = flash_size_bytes / PAGE_SIZE;
+                    for page in 0..page_count {
+                        self.erase_sector(page).await?;
+                    }
+                    Ok(())
                 }
                 _ => {
                     warn!("Erasing flash for non-F4 STM32 is not supported");
@@ -616,6 +810,7 @@ impl<'a> DebugInterface<'a> {
 
                     self.execute_stm32f4_program(addr, flash_cr).await
                 }
+                StmFamily::G0 => self.stm32g0_write_rmw(addr, data, bytes).await,
                 _ => Err(SwdError::Unsupported),
             },
             _ => {
@@ -763,6 +958,27 @@ impl<'a> DebugInterface<'a> {
 
                     debug!("Flash bulk program completed, {} words written", data.len());
                     self.swd.set_addr_inc(false).await
+                }
+                StmFamily::G0 => {
+                    let mut current_addr = addr;
+                    let mut i = 0usize;
+                    while i < data.len() {
+                        if (current_addr & 0x7) != 0 || i + 1 >= data.len() {
+                            self.stm32g0_write_rmw(current_addr, data[i], OperationBytes::BYTE4)
+                                .await?;
+                            current_addr += 4;
+                            i += 1;
+                            continue;
+                        }
+
+                        let lo = data[i];
+                        let hi = data[i + 1];
+                        self.execute_stm32g0_program_doubleword(current_addr, lo, hi)
+                            .await?;
+                        current_addr += 8;
+                        i += 2;
+                    }
+                    Ok(())
                 }
                 _ => Err(SwdError::Unsupported),
             },

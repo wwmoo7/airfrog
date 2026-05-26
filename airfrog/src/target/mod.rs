@@ -241,12 +241,13 @@ impl<'a> Target<'a> {
 
     async fn connect(&mut self) -> Result<(), SwdError> {
         self.swd.reset_swd_target().await?;
-        let mcu = if let Some(mcu) = self.swd.mcu() {
-            mcu
-        } else {
+        if matches!(self.swd.mcu(), Some(Mcu::Unknown(_))) {
+            let _ = self.swd.swd_if().refresh_mcu().await;
+        }
+        let mcu = self.swd.mcu().ok_or_else(|| {
             warn!("Error: Connected to target via SWD, but no MCU details");
-            return Err(SwdError::NotReady);
-        };
+            SwdError::NotReady
+        })?;
         info!("OK:    Target connected {self}");
 
         // Start the firmware task

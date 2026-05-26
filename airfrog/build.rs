@@ -139,7 +139,11 @@ fn minify_html_js(dir: &str, out_dir: &Path) -> Result<(), Box<dyn std::error::E
 }
 
 fn minify_html(path: &Path, out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let content = fs::read_to_string(path)?;
+    let mut content = fs::read_to_string(path)?;
+    if content.contains("__AIRFROG_VERSION__") {
+        let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
+        content = content.replace("__AIRFROG_VERSION__", &version);
+    }
     let cfg = minify_html::Cfg::default();
     let minified = minify_html::minify(content.as_bytes(), &cfg);
 

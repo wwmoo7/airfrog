@@ -15,6 +15,12 @@ default-members = [
 ]
 resolver = "2"
 
+[patch.crates-io]
+airfrog-core = { path = "airfrog-core" }
+airfrog-swd = { path = "airfrog-swd" }
+airfrog-bin = { path = "airfrog-bin" }
+airfrog-util = { path = "airfrog-util" }
+
 [package]
 name = "airfrog-ws"
 version = "0.1.1"
